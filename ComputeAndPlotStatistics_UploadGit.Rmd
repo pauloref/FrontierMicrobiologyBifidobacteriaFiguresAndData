@@ -1,0 +1,381 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+This Notebook performs the analysis of the First part of NUTRISHIEDL STUDY I. Meaning it imports, and analyses all the data from the OBSERVATIONAL part of the study. 
+
+
+
+```{r}
+#Load Packages
+library(ggplot2)
+library(readxl)
+library(dplyr)
+library(reshape2)
+library(ggpubr)
+library(vtable)
+library(network)
+library(sna)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(qgraph)
+library(ggraph)
+library(mixOmics)
+library(grid)
+
+```
+First we load all data-sets, and prepare them for analysis
+```{r}
+#Microbiome data
+MicrobiomeData<- read.csv("Statistics/Study1-Data/MicrobiomeData.csv")
+MicrobiomeVariables<-colnames(MicrobiomeData)[2:length(colnames(MicrobiomeData))]
+#Kidmed scores
+KidmedScores <- read.csv("Statistics/Study1-Data/KidmedScores.csv")
+
+#And the conditions
+Conditions<-read.csv("Statistics/Study1-Data/Conditions.csv"
+)
+
+KidmedScores<-merge(KidmedScores,Conditions,by.x = "Id",by.y = "Id",all = TRUE)
+#Merging kidmed and metabolome
+MicroKidmed<-merge(KidmedScores,MicrobiomeData,by.x = "Id",by.y = "Id",all = TRUE)
+
+#Metabolome
+BileAcids <- read_excel("Statistics/Study1-Data/Metabolome.xlsx",sheet = "BA")
+SCFA<-read_excel("Statistics/Study1-Data/Metabolome.xlsx",sheet = "SCFA")
+
+Metabolome<-merge(BileAcids,SCFA,by.x = "Id",by.y = "Id",all = TRUE)
+MetabolomeVariables<-colnames(Metabolome)[2:length(colnames(Metabolome))]
+ScfaVariables<-colnames(SCFA)[2:length(colnames(SCFA))]
+#And now for Food groups
+FoodGroups <- read.csv("Statistics/Study1-Data/FoodGroups.csv",
+                       stringsAsFactors = FALSE)
+FoodGroupsVariables<-colnames(FoodGroups)[2:length(colnames(FoodGroups))]
+
+#We will now merge microbiome and Kidmd with FoodGroup 
+FoodMicrobiome<-merge(MicroKidmed,FoodGroups, by.x = "Id",by.y = "Id",all = TRUE)
+
+#And create a complete dataset with all variables
+AllVariables<-merge(FoodMicrobiome,Metabolome,by.x = "Id",by.y = "Id",all = TRUE)
+
+#We now load the dataset with the Height, weight and BMI
+BmiData <- read_xlsx("Statistics/Study1-Data/BMI.xlsx",sheet = "BMI")
+AllVariables<-merge(AllVariables,BmiData,by.x = "Id",by.y = "Id",all = TRUE)
+
+#we now keep only the IDs which were in the Observation study
+AllVariables<-AllVariables[which(AllVariables$Id %in% Conditions$Id),]
+
+#We now create a few variables we need
+AllVariables$TotalEnergyIntake=
+  4*AllVariables$MacroNutrientsCalculation.TotalProteinIntakeG+
+  4*AllVariables$MacroNutrientsCalculation.TotalCarbohydrateIntakeG+
+  9*AllVariables$MacroNutrientsCalculation.TotalFatIntakeG+
+  7*AllVariables$MacroNutrientsCalculation.TotalAlcoholIntakeG
+FoodGroupsVariables<-c(FoodGroupsVariables,"TotalEnergyIntake")
+
+NumericalVariables<-colnames(AllVariables)[
+  !(colnames(AllVariables)%in%c("Id","Condition","Adherence"))
+]
+NumericalVariablesData<-AllVariables[NumericalVariables]
+
+VariableTypes<-data.frame(Name=NumericalVariables,Type="None")
+VariableTypes$Type[which(VariableTypes$Name %in% colnames(MicrobiomeData))]<-"Microbiome"
+VariableTypes$Type[which(VariableTypes$Name %in% colnames(KidmedScores))]<-"Kidmed"
+VariableTypes$Type[which(VariableTypes$Name %in% colnames(BileAcids))]<-"BileAcids"
+VariableTypes$Type[which(VariableTypes$Name %in% colnames(SCFA))]<-"SCFA"
+#VariableTypes$Type[which(VariableTypes$Name %in% colnames(Metabolome))]<-"Metabolome"
+VariableTypes$Type[which(VariableTypes$Name %in% colnames(FoodGroups))]<-"FoodGroups"
+VariableTypes$Type[which(VariableTypes$Name %in% c("TotalEnergyIntake"))]<-"FoodGroups"
+
+SelectedVariables<-c("Kidmed",MicrobiomeVariables,ScfaVariables,"BMI")
+
+#Last, we parepare a csv with all necessary variables, for sharing where needed
+write.csv(x = AllVariables[SelectedVariables,],file = "SupplementaryData1.csv",sep = ","
+)
+```
+
+#############################################################################################
+The following sets of blocks will perform "unidimensional analysis of the data"
+
+In the following block, we prepare the "correltion Matrix" which can be used to plot heatmaps
+```{r}
+CorrMat<-#na.omit(
+  round(cor(AllVariables[,SelectedVariables],
+            use="pairwise.complete.obs",method = "spearman"),2)
+#)
+CorrMat[which(is.na(CorrMat))]<-0
+# reorder corr matrix
+# using corr coefficient as distance metric
+dist <- as.dist((1-CorrMat)/2)
+# hierarchical clustering the dist matrix
+hc <- hclust(dist,method = "median")
+CorrMat <-CorrMat[hc$order, hc$order]
+
+# reduce the size of correlation matrix
+melted_cormat <- melt(CorrMat)
+melted_cormat$Var1<-as.character(melted_cormat$Var1)
+melted_cormat$Var2<-as.character(melted_cormat$Var2)
+
+#We now add a "significance" test to the correlation matrix: 
+
+for(i in 1:dim(melted_cormat)[1]){
+  Pval<-cor.test(AllVariables[,melted_cormat$Var1[i]],
+                 AllVariables[,melted_cormat$Var2[i]],method="spearman")$p.value
+  if(!is.numeric(Pval) || is.na(Pval) || Pval > 0.05){
+    Significance<-NA
+  }else if(Pval > 0.01){
+    Significance<-1
+  }else if(Pval > 0.001){
+    Significance<-2
+  }else if(Pval <= 0.001){
+    Significance<-3
+  }else{
+    Significance<-NA
+  }
+  
+  melted_cormat$Pvalue[i]<-Pval
+  melted_cormat$Significance[i]<-Significance
+}
+
+melted_cormat$Significance<-as.numeric(melted_cormat$Significance)
+
+```
+
+We now create Boxplots for All variables in relationship to the conditions. These are Figures 2, 3 and 4. 
+```{r}
+#my_comparisons <- list( c("HC", "Obese"), c("HC", "T1D"), c("T1D", "Obese") )
+#Micro<-colnames(MicrobiomeData)[9]
+#my_comparisons<-list( c("HC", "Obese"), c("Obese", "T1D"), c("HC", "T1D") )
+#for (Variable in colnames(AllVariables)[!(colnames(AllVariables)%in%c("Id","Condition","Adherence"))]){
+Plots<-list()
+for (Variable in SelectedVariables){
+  plot<-ggplot(data = AllVariables,aes(x=Condition,y=get(Variable)))+
+    geom_boxplot(notch = TRUE,aes(fill=Condition))+
+    theme_bw()+
+    #stat_compare_means(comparisons = my_comparisons, method = "kruskal.test")
+    stat_pwc(label = "p.format", method = "wilcox.test",
+             hide.ns = TRUE,p.adjust.method = "none",size = 1.5,label.size = 7)+
+    theme(
+      legend.position = "none",
+      text=element_text(size=20),
+      axis.title.x = element_blank(),
+      axis.text = element_text(size=20),
+    )+
+    scale_fill_manual(values = c("steelblue","tomato","plum"))
+  if(Variable %in% MetabolomeVariables){
+    plot<-plot+ylab(paste(Variable,"[µmol/g creatinine]"))
+  }else if(Variable %in% MicrobiomeVariables){
+    plot<-plot+ylab(paste(Variable,"[relative abundance]"))
+  }else{
+    plot<-plot+ylab(Variable)
+  }
+  
+  #We now save the plots in the different folders according to data type. 
+  
+  #The microbiome BoxPlots are the ones shown in Figure 3
+  if(Variable %in% MicrobiomeVariables){
+    ggsave(filename = paste("Statistics/Plots/BoxPlotsConditionsMicrobiome/",Variable,".pdf",sep = ""),
+           plot = plot)
+    
+    
+  }else if(Variable %in% ScfaVariables){
+    #Next, we store the Scfa data which is shown in Figure 4
+    ggsave(filename = paste("Statistics/Plots/BoxPlotsConditionsScfa/",Variable,".pdf",sep = ""),
+           plot = plot)
+    
+    
+  }else{ 
+    #The remaining variables include the KIDMED, which is shown in Figure 2
+    ggsave(filename = paste("Statistics/Plots/BoxPlotsConditionsSelect/",Variable,".pdf",sep = ""),
+           plot = plot)
+  }
+}
+
+```
+
+We can now make  series of "heatmaps" where we plot several variables and color code the different correlations. This is Figure 8
+```{r}
+#Plot of all variables
+MicrobiomeVariablesPlot<-MicrobiomeVariables[which(MicrobiomeVariables != "animalis.lactis")]
+TilePlot<-ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value))+ 
+  geom_tile()+
+  theme_bw() + #xlab("Varible 1") + ylab("Variable 2")+ 
+  xlab("") + ylab("")+
+  coord_equal(ratio = 1)+
+  scale_x_discrete(expand = c(0,0),limits = c(ScfaVariables,MicrobiomeVariablesPlot))+
+  scale_y_discrete(expand = c(0,0),limits = c(ScfaVariables,MicrobiomeVariablesPlot)) +
+  scale_fill_gradient2(low = "blue", mid="white", high = "red",
+                       limits=c(-1,1),name="Correlation")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        text = element_text(size = 10))+
+  ggtitle("Correlation between variables")+
+  geom_point(aes(size=Significance),fill="black")+
+  scale_size_continuous(limits = c(0,3),
+                        range=c(0,2),
+                        name="Significance",
+                        labels=c("Not significant","P-Value < 5%","P-value < 1%",
+                                 "P-value < 0.1%"))+
+  # geom_rect(aes(xmin="Acetic.acid",ymin="Acetic.acid",xmax="Isoleucine",ymax="Isoleucine"),color="black",size=1)
+  geom_rect(aes(xmin=0.5,ymin=0.5,xmax=12.5,ymax=12.5),color="black",size=0.7,fill=NA)+
+  geom_rect(aes(xmin=12.5,ymin=12.5,xmax=19.5,ymax=19.5),color="black",size=0.7,fill=NA)
+# ggsave(filename = "Statistics/TilePlot.pdf",plot = TilePlot,units = "px",width = 5000,height = 5000
+# )
+TilePlot
+```
+
+We will now follow with Partial Least Square Discriminant analysis (PLS-DA), to find the predictors for the different conditions. The first one (Microbiome), correspods to Figure 5
+
+```{r}
+#Begin by selecting the independent and the response variables
+SelectedColors<-c("steelblue","tomato","plum")
+FittedVariables<-AllVariables[,MicrobiomeVariables]
+Response<-AllVariables[,"Condition"]
+ModelPLS<-splsda(FittedVariables,Response,scale = TRUE,ncomp = 2)
+
+background.mahal <-  background.predict(ModelPLS,
+                                        comp.predicted = 2,
+                                        dist = 'mahalanobis.dist')
+plotIndiv(ModelPLS, 
+          rep.space = 'XY-variate', 
+          ellipse = TRUE,  # plot using the ellipses
+          legend = TRUE,
+          background = background.mahal,
+          ind.names=FALSE,
+          title = "PLS-DA Microbiome Variables \n Scatter plot",
+          size.title = rel(1),
+          X.label = "LV 1",
+          Y.label = "LV 2",
+          style = "ggplot2",
+          col.per.group = SelectedColors
+)
+
+# plotIndiv(ModelPLS, 
+#           rep.space = 'multi', 
+#           # ellipse = TRUE,  # plot using the ellipses
+#           legend = TRUE,
+#           background = background.mahal)
+PlotLv1<-plotLoadings(ModelPLS, method = 'mean', contrib = 'max',comp = 1,
+                      title="Individual variable contributions on LV 1",
+                      size.title = rel(1),legend.color = SelectedColors
+)$X
+
+
+# PlotLv1$Var<-c(
+#   "B. breve",
+#   "B. bifidum",
+#   "B. longum subs. infantis",
+#   "B. longum subs. longum",
+#   "B. animalis subs. animalis",
+#   "B. pseudocatenulatum",
+#   "B. adolescentis"    
+# )
+# 
+# Lv1<-ggplot(data = PlotLv1,aes(x=importance,y=Var,fill=GroupContrib))+
+#   geom_col()+
+#   scale_fill_manual(values = SelectedColors,name="Outcome")+
+#   theme_bw()+
+#   theme(
+#     axis.title.y = element_blank(),
+#   )
+# Lv1  
+
+PlotLv2<-plotLoadings(ModelPLS, method = 'mean', contrib = 'max',comp = 2,
+                      title="Individual variable contributions on LV 2",
+                      size.title = rel(1),legend.color = SelectedColors
+)
+
+```
+Following the results above, we see that the LV1 associated with microbiome, is explaining Obesity quite well. As a validation of the model, we propose the following strategy: 
+We will compute the value of LV1 for each participant, and correlate with his/her BMI. 
+This is shown in Figure 6
+
+```{r}
+#We start by computing LV1 in each participant we do this by creating 2 matrixes, and then using the vector multiplication operation
+A<-as.matrix(AllVariables[,MicrobiomeVariables])
+B<-matrix(ModelPLS[["loadings.star"]][[1]][,1])
+AllVariables$LV1<-A%*%B
+x<-"BMI"
+y<-"LV1"
+
+ScatterPlot<-ggplot(data = AllVariables,
+                    aes(x=get(x),y=get(y)))+
+  geom_point(size=3,aes_string(colour=ColorVariable))+
+  geom_smooth(method=lm,se=FALSE)+
+  theme_bw()+xlab(x)+ylab(y)+
+  ggtitle(paste(x,"VS",y,"\n","Cor=",
+                round(cor(AllVariables[,x],AllVariables[,y],
+                          use = "pairwise.complete.obs",method = "spearman"
+                ),digits = 2),"P-value=",
+                round(cor.test(AllVariables[,x],AllVariables[,y],method="spearman"
+                               
+                )$p.value,digits = 3)
+  ))+
+  scale_color_manual(values = c("steelblue","tomato","plum"))+
+  theme(
+    #      legend.position = "none",
+    text=element_text(size=20),
+    #      axis.title.x = element_blank(),
+    axis.text = element_text(size=20)
+  )
+ggsave(filename = 
+         paste("Statistics/Plots/",
+               x,"-",y,".pdf",sep = ""),plot = ScatterPlot)
+ScatterPlot
+
+```
+
+
+We now move to do the same PLS-DA analysis for metabolic data, which is shown in Figure 7
+
+```{r}
+#Begin by selecting the independent and the response variables
+KeyMetabolites<-c("Acetic.Acid",
+                  "Propionic.Acid",
+                  "Isobutyric.Acid",
+                  "Butyric.Acid",
+                  "Methylbutyric.Acid",
+                  "Isovaleric.Acid",
+                  "Valeric.Acid",
+                  "Heptanoic.Acid",
+                  "Valine",
+                  "Leucine",
+                  "Isoleucine")
+FittedVariables<-AllVariables[,c(ScfaVariables)]
+Response<-AllVariables[,"Condition"]
+ModelPLS<-splsda(FittedVariables,Response,scale = TRUE,ncomp = 2)
+
+background.mahal <-  background.predict(ModelPLS,
+                                        comp.predicted = 2,
+                                        dist = 'mahalanobis.dist')
+
+
+plotIndiv(ModelPLS, 
+          rep.space = 'XY-variate', 
+          ellipse = TRUE,  # plot using the ellipses
+          legend = TRUE,
+          background = background.mahal,
+          ind.names=FALSE,
+          title = "PLS-DA Metabolic variables \n Scatter plot",
+          size.title = rel(1),
+          X.label = "LV 1",
+          Y.label = "LV 2",
+          col.per.group = SelectedColors
+)
+
+# 
+# plotIndiv(ModelPLS, 
+#           rep.space = 'multi', 
+#           # ellipse = TRUE,  # plot using the ellipses
+#           legend = TRUE,
+#           background = background.mahal)
+plotLoadings(ModelPLS, method = 'mean', contrib = 'max',comp = 1,
+             title="Individual variable contributions on LV 1",
+             size.title = rel(1),legend.color = SelectedColors)
+plotLoadings(ModelPLS, method = 'mean', contrib = 'max',comp = 2,
+             title="Individual variable contributions on LV 2",
+             size.title = rel(1),legend.color = SelectedColors)
+
+```
+
+
